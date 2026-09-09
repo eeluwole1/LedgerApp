@@ -2,6 +2,8 @@
 
 The backend for **Ledger**, a personal finance tracker. It's an ASP.NET Core Web API that stores each user's income/expense transactions, issues JWTs for authentication, and enforces that a user can only ever see or modify their own data.
 
+**Live demo:** https://ledgerapp-demo-bgaqbpadbzfjhegh.canadacentral-01.azurewebsites.net (Swagger UI at `/swagger`) — consumed by the deployed frontend, see `Ledger.Client/README.md`.
+
 ## Tech stack
 
 - **.NET 10** / ASP.NET Core Web API
@@ -61,6 +63,8 @@ Being logged in only proves *who* you are — it doesn't by itself stop you from
 
 This is what stops the classic mistake of relying on `[Authorize]` alone: `[Authorize]` answers "is there a valid user?", the per-query `UserId` filter answers "does this row belong to that user?" — you need both.
 
+**Login is defensive about legacy/malformed password hashes**: `AuthController.Login` wraps `PasswordHasher<User>.VerifyHashedPassword` in a try/catch for `FormatException` — if a stored password value isn't a hash the current hasher recognizes (e.g. a row seeded before hashing was added), it's treated as a failed match (`401`) instead of bubbling up as an unhandled `500`.
+
 ### JWT configuration
 
 Read from the `Jwt` section of configuration (`appsettings.json` locally; override via environment variables or your host's configuration/secrets store in any other environment):
@@ -112,4 +116,6 @@ All `Transactions` endpoints require `Authorization: Bearer <token>` and operate
 - `Jwt:Key` → a freshly generated secret, **not** the development one
 - `AllowedOrigins` → your deployed frontend's URL
 
-Prefer setting these via Azure App Service's **Configuration** blade (environment variables) or Key Vault rather than editing `appsettings.Production.json` directly, so secrets never sit in source control.
+Prefer setting these via Azure App Service's **Configuration → Application settings** blade (environment variables, using double-underscore for nested keys — e.g. `Jwt__Key`, `AllowedOrigins__0`) or Key Vault rather than editing `appsettings.Production.json` directly, so secrets never sit in source control. Saving Application settings triggers an automatic restart of the app.
+
+**Azure SQL firewall**: by default, an Azure SQL Server rejects every connection, including from your own App Service. Under the SQL **Server** resource (not the database) → **Security → Networking**, check **"Allow Azure services and resources to access this server"** — without it, every DB-touching endpoint returns `500` even though the connection string, JWT config, and CORS are all correct. This one is easy to miss because Swagger's static docs page still loads fine (it never touches the database), so the failure only shows up once you actually call an endpoint.
