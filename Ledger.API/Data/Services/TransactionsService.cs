@@ -89,6 +89,7 @@ namespace Ledger.API.Data.Services
                 transactionDb.Type = transaction.Type;
                 transactionDb.Amount = transaction.Amount;
                 transactionDb.Category = transaction.Category;
+                transactionDb.CreatedAt = transaction.CreatedAt;
                 transactionDb.UpdatedAt = DateTime.UtcNow;
 
                 context.Transactions.Update(transactionDb);
