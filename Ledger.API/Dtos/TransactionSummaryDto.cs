@@ -2,8 +2,8 @@ namespace Ledger.API.Dtos
 {
     public class TransactionSummaryDto
     {
-        public double TotalIncome { get; set; }
-        public double TotalExpenses { get; set; }
-        public double NetBalance { get; set; }
+        public decimal TotalIncome { get; set; }
+        public decimal TotalExpenses { get; set; }
+        public decimal NetBalance { get; set; }
     }
 }

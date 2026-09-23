@@ -64,8 +64,8 @@ namespace Ledger.API.Data.Services
         {
             var userTransactions = context.Transactions.Where(t => t.UserId == userId);
 
-            var totalIncome = userTransactions.Where(t => t.Type == "Income").Sum(t => (double?)t.Amount) ?? 0;
-            var totalExpenses = userTransactions.Where(t => t.Type == "Expense").Sum(t => (double?)t.Amount) ?? 0;
+            var totalIncome = userTransactions.Where(t => t.Type == "Income").Sum(t => (decimal?)t.Amount) ?? 0;
+            var totalExpenses = userTransactions.Where(t => t.Type == "Expense").Sum(t => (decimal?)t.Amount) ?? 0;
 
             return new TransactionSummaryDto
             {
