@@ -4,6 +4,14 @@ The backend for **Ledger**, a personal finance tracker. It's an ASP.NET Core Web
 
 **Live demo:** https://ledgerapp-demo-bgaqbpadbzfjhegh.canadacentral-01.azurewebsites.net (Swagger UI at `/swagger`) — consumed by the deployed frontend, see `Ledger.Client/README.md`.
 
+## User Story
+
+> **As a Ledger user, I want to record and review my own income and expenses through a secure API — with running totals I can actually trust — so that I always know where my money stands without a third party ever seeing or touching my data.**
+
+**The 30-second interview version:** This is the ASP.NET Core backend for a personal finance tracker. A user registers, logs in, and gets a JWT; from there every transaction they create, read, update, or delete is scoped to their account alone, enforced server-side on every query — not just hidden in the UI. The API exposes paginated transaction listings plus a separately-aggregated summary endpoint, so dashboard totals stay accurate regardless of which page the client happens to have loaded.
+
+The part worth highlighting: I found and fixed a floating-point precision bug in `Amount`, which was `double` — binary floating-point that can't exactly represent most decimal fractions (`0.1 + 0.2` evaluates to `0.30000000000000004`, not `0.3`), and those per-transaction rounding errors compound as the summary endpoint sums a user's transactions into a balance. That's exactly the class of bug that matters most in a ledger: not a crash, just numbers that are silently, slightly wrong. I switched `Amount` to `decimal(18,2)`, wrote a unit test proving the exact sum now holds, and — since the fix changes an existing column's actual database type — applied the EF Core migration to production *before* deploying the updated code, so the running API and its database never briefly disagreed about the column's shape. See [A bug found and fixed](#a-bug-found-and-fixed-amount-was-double) below for the full writeup.
+
 ## Tech stack
 
 - **.NET 10** / ASP.NET Core Web API
@@ -11,6 +19,7 @@ The backend for **Ledger**, a personal finance tracker. It's an ASP.NET Core Web
 - **JWT Bearer authentication** (`Microsoft.AspNetCore.Authentication.JwtBearer`)
 - **`PasswordHasher<T>`** (`Microsoft.Extensions.Identity.Core`) for password hashing — not the full ASP.NET Core Identity framework, just its hashing utility
 - **Swagger / OpenAPI** for interactive API docs in development
+- **xUnit** + **EF Core's InMemory provider** for service-layer unit tests (`Ledger.API.Tests`)
 
 ## Project structure
 
@@ -23,13 +32,19 @@ Data/
   Services/
     TransactionsService.cs    Business logic + queries, called by the controller
 Models/
-  User.cs, Transaction.cs     EF entities
+  User.cs, Transaction.cs     EF entities — Transaction.Amount is decimal(18,2), not double/float
   Base/BaseEntity.cs          Shared Id/CreatedAt/UpdatedAt
 Dtos/
   PostUserDto, LoginUserDto           Auth request shapes
   PostTransactionDto, PutTransactionDto  Transaction request shapes
   PagedResult<T>, TransactionSummaryDto  Response shapes
 Migrations/                  EF Core migration history
+```
+
+```
+Ledger.API.Tests/
+  TransactionAmountPrecisionTests.cs  Unit tests against TransactionsService via EF Core's
+                                       InMemory provider — no web host or real DB required
 ```
 
 ## Running locally
@@ -106,6 +121,30 @@ All `Transactions` endpoints require `Authorization: Bearer <token>` and operate
 | DELETE | `/api/Transactions/Delete/{id}` | — | `200` · `404` if missing or not owned |
 
 `page`/`pageSize` are clamped server-side (`page` ≥ 1, `1 ≤ pageSize ≤ 100`) regardless of what's passed.
+
+## Testing
+
+```
+dotnet test
+```
+
+Runs `Ledger.API.Tests` — currently two unit tests against `TransactionsService`, using EF Core's InMemory provider so neither a real database nor a running web host is needed:
+
+- `GetSummary` sums fractional amounts (e.g. `0.1 + 0.2`) with exact `decimal` precision — the regression test for the bug described below.
+- `GetSummary` only includes the requesting user's own transactions.
+
+There's no integration-level coverage yet — the service layer is unit-tested, but the controllers and the JWT/authorization pipeline itself (e.g. via `WebApplicationFactory<Program>`) aren't.
+
+## A bug found and fixed: `Amount` was `double`
+
+`Transaction.Amount` — plus both transaction DTOs and `TransactionSummaryDto`'s totals — used to be `double`, mapped to SQL Server's `float`. Binary floating-point can't exactly represent most decimal fractions (`0.1 + 0.2` evaluates to `0.30000000000000004`, not `0.3`), and those per-transaction rounding errors compound as `GetSummary` adds a user's transactions into a balance — a silent, easy-to-miss bug in exactly the kind of app where it matters most.
+
+Fixed by switching `Amount` (and the summary totals) to `decimal`, explicitly mapped to `decimal(18,2)` so EF Core doesn't fall back to a provider default. Since the production API and its database share the same schema at runtime, the EF Core migration was applied to the production database *first*, then the updated code deployed — deploying the code alone first would have had the live API reading a `decimal`-typed column that was still physically `float`, breaking every transaction endpoint.
+
+## Known limitations
+
+- **Synchronous EF Core calls.** `TransactionsService` uses `ToList()` / `FirstOrDefault()` / `SaveChanges()`, not their `Async` counterparts. Not a functional problem at this app's scale, but a synchronous DB call blocks a thread-pool thread for the query's duration — under real concurrent load this should be converted to `async`/`await` throughout the service and controller layers.
+- **No integration tests** — see Testing above.
 
 ## Deploying (Azure)
 
