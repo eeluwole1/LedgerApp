@@ -36,6 +36,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 var conn = builder.Configuration.GetConnectionString("Default");
 builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlServer(conn));
 builder.Services.AddScoped<ITransactionsService, TransactionsService>();
+builder.Services.AddScoped<IBudgetsService, BudgetsService>();
 builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
 
 builder.Services.AddControllers();

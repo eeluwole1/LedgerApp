@@ -27,17 +27,21 @@ The part worth highlighting: I found and fixed a floating-point precision bug in
 Controllers/
   AuthController.cs          Register, Login — issues JWTs
   TransactionsController.cs  CRUD + pagination + summary, all scoped to the logged-in user
+  BudgetsController.cs       Per-category monthly budgets + spent-vs-limit progress, scoped to the user
 Data/
-  AppDbContext.cs             EF Core DbContext (Users, Transactions)
+  AppDbContext.cs             EF Core DbContext (Users, Transactions, Budgets)
   Services/
     TransactionsService.cs    Business logic + queries, called by the controller
+    BudgetsService.cs         Budget CRUD + the monthly progress aggregation
 Models/
-  User.cs, Transaction.cs     EF entities — Transaction.Amount is decimal(18,2), not double/float
+  User.cs, Transaction.cs, Budget.cs  EF entities — money columns are decimal(18,2), not double/float
   Base/BaseEntity.cs          Shared Id/CreatedAt/UpdatedAt
 Dtos/
   PostUserDto, LoginUserDto           Auth request shapes
   PostTransactionDto, PutTransactionDto  Transaction request shapes
   PagedResult<T>, TransactionSummaryDto  Response shapes
+  SaveBudgetDto, UpdateBudgetDto      Budget request shapes (validated with data annotations)
+  BudgetDto, BudgetProgressDto        Budget response shapes — entities are never returned directly
 Migrations/                  EF Core migration history
 ```
 
@@ -46,6 +50,7 @@ Ledger.API.Tests/
   TransactionAmountPrecisionTests.cs  Unit tests against TransactionsService via EF Core's
                                        InMemory provider — no web host or real DB required
   TransactionMonthFilterTests.cs      Month filter: boundary days, all-time fallback, user isolation
+  BudgetsServiceTests.cs              Budget CRUD, duplicates, ownership, and the progress math
 ```
 
 ## Running locally
@@ -123,17 +128,35 @@ All `Transactions` endpoints require `Authorization: Bearer <token>` and operate
 
 `page`/`pageSize` are clamped server-side (`page` ≥ 1, `1 ≤ pageSize ≤ 100`) regardless of what's passed.
 
+### Budgets
+
+One monthly limit per category per user. Same ownership rules as transactions: every query filters by the caller's `UserId`, and another user's budget returns `404`, indistinguishable from one that doesn't exist.
+
+| Method | Route | Body / Query | Response |
+|---|---|---|---|
+| GET | `/api/Budgets/All` | — | `200 [ { id, category, monthlyLimit } ]` |
+| GET | `/api/Budgets/Progress?year=2026&month=9` | `year`/`month` optional (default: current UTC month), but sent together | `200 [ { budgetId, category, monthlyLimit, spent, remaining, percentUsed } ]` · `400` on bad month/year |
+| POST | `/api/Budgets/Create` | `{ category, monthlyLimit }` | `200 <budget>` · `409` if that category already has a budget · `400` if invalid (blank/over 50 chars category, limit < 0.01) |
+| PUT | `/api/Budgets/Update/{id}` | `{ monthlyLimit }` | `200 <budget>` · `404` if missing or not owned |
+| DELETE | `/api/Budgets/Delete/{id}` | — | `200` · `404` if missing or not owned |
+
+`Progress` sums only the caller's **expense** transactions for the month, grouped by category in SQL (`GroupBy` + `Sum`), then matches them to budgets by category name. `remaining` goes negative and `percentUsed` goes above 100 when over budget. A category can't be renamed — delete and recreate it. Uniqueness is enforced by a database index on `(UserId, Category)`, with a friendly `409` in front of it.
+
 ## Testing
 
 ```
 dotnet test
 ```
 
-Runs `Ledger.API.Tests` — currently six unit tests against `TransactionsService`, using EF Core's InMemory provider so neither a real database nor a running web host is needed:
+Runs `Ledger.API.Tests` — currently fifteen unit tests against `TransactionsService` and `BudgetsService`, using EF Core's InMemory provider so neither a real database nor a running web host is needed:
 
 - `GetSummary` sums fractional amounts (e.g. `0.1 + 0.2`) with exact `decimal` precision — the regression test for the bug described below.
 - `GetSummary` only includes the requesting user's own transactions.
 - Month filter: `GetSummary` and `GetAll` include the first and last day of a month but not the neighbouring days (Aug 31 / Oct 1), still cover all time when no month is given, and never return another user's rows.
+
+- Budgets: create/update/delete, trimmed categories, duplicate category rejected (but allowed for a different user), other users' budgets invisible and untouchable, and the progress math — only that user's expenses in that category and month, `decimal`-exact sums (10.10 + 20.20 = 30.30), negative remaining and >100% when over budget, and a zero-spend budget.
+
+Budgets were also checked end to end against the real SQL Server database and the running Angular client with throwaway users: create, a `409` on a duplicate category, `400` on a zero limit or blank category, the September progress figures (30.30 spent / 69.70 left), a second user getting `[]` and `404` on someone else's budget, `401` without a token, and the dashboard bars rendering green, amber (83%) and red (`$10.00 over`, bar capped at 100%).
 
 The month filter was also checked end to end against the real SQL Server database with a throwaway user (month boundaries, all-time vs. one month, and `400` on `month=13` or `year` without `month`).
 
@@ -149,6 +172,7 @@ Fixed by switching `Amount` (and the summary totals) to `decimal`, explicitly ma
 
 - **Synchronous EF Core calls.** `TransactionsService` uses `ToList()` / `FirstOrDefault()` / `SaveChanges()`, not their `Async` counterparts. Not a functional problem at this app's scale, but a synchronous DB call blocks a thread-pool thread for the query's duration — under real concurrent load this should be converted to `async`/`await` throughout the service and controller layers.
 - **No integration tests** — see Testing above.
+- **Categories are free text.** Neither transactions nor budgets validate a category against a server-side list; the dropdown lives in the Angular client, and a budget only "sees" spending whose category text matches it (case-insensitively). Fine while the client is the only writer, but a shared list on the server would be the next step.
 
 ## Roadmap
 
@@ -157,9 +181,9 @@ Fixed by switching `Amount` (and the summary totals) to `decimal`, explicitly ma
 | Phase | Scope | Status |
 |---|---|---|
 | 1. Month filter | Optional year/month on `GetAll` and `GetSummary`; month selector on the dashboard. No schema change. | **Built** |
-| 2. Budgets | New `Budget` entity (`UserId`, `Category`, `MonthlyLimit` as `decimal(18,2)`, unique per user and category), migration, and a `BudgetsController` with the same per-user ownership rules as transactions. | Planned |
-| 3. Progress view | Endpoint returning spent vs. limit per category for a month (`GroupBy` aggregation); progress bars in the dashboard. | Planned |
-| 4. Tests and write-up | Unit tests for the aggregation and budget ownership; README updated to match what shipped. | Planned |
+| 2. Budgets | New `Budget` entity (`UserId`, `Category`, `MonthlyLimit` as `decimal(18,2)`, unique per user and category), migration (`AddBudgets`), and a `BudgetsController` with the same per-user ownership rules as transactions. | **Built**; `AddBudgets` must be applied to the database before the code is deployed |
+| 3. Progress view | Endpoint returning spent vs. limit per category for a month (`GroupBy` aggregation); progress bars in the dashboard. | **Built** (API + dashboard bars + `/budgets` page) |
+| 4. Tests and write-up | Unit tests for the aggregation and budget ownership; README updated to match what shipped. | **Built** |
 
 Deliberately out of scope for now: bank sync, CSV import, recurring transactions, charts, multi-currency, forgot-password, and converting EF Core calls to `async`.
 

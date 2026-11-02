@@ -12,10 +12,15 @@ namespace Ledger.API.Data
         }
         public DbSet<User> Users { get; set; }
         public DbSet<Transaction> Transactions { get; set; }
+        public DbSet<Budget> Budgets { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
+
+            modelBuilder.Entity<Budget>()
+                .HasIndex(b => new { b.UserId, b.Category })
+                .IsUnique();
 
             // SQL Server doesn't persist DateTimeKind, so values come back as
             // Unspecified after a round-trip, which makes JSON serialization omit
