@@ -5,8 +5,8 @@ namespace Ledger.API.Data.Services
 {
     public interface ITransactionsService
     {
-        PagedResult<Transaction> GetAll(int userId, int page, int pageSize);
-        TransactionSummaryDto GetSummary(int userId);
+        PagedResult<Transaction> GetAll(int userId, int page, int pageSize, int? year = null, int? month = null);
+        TransactionSummaryDto GetSummary(int userId, int? year = null, int? month = null);
         Transaction? GetById(int id, int userId);
         Transaction Add(PostTransactionDto transaction, int userId);
         Transaction? Update(int id, PutTransactionDto transaction, int userId);
@@ -42,10 +42,23 @@ namespace Ledger.API.Data.Services
             return true;
         }
 
-        public PagedResult<Transaction> GetAll(int userId, int page, int pageSize)
+        private IQueryable<Transaction> ForUserInMonth(int userId, int? year, int? month)
         {
-            var query = context.Transactions
-                .Where(t => t.UserId == userId)
+            var query = context.Transactions.Where(t => t.UserId == userId);
+
+            if (year.HasValue && month.HasValue)
+            {
+                var start = new DateTime(year.Value, month.Value, 1);
+                var end = start.AddMonths(1);
+                query = query.Where(t => t.CreatedAt >= start && t.CreatedAt < end);
+            }
+
+            return query;
+        }
+
+        public PagedResult<Transaction> GetAll(int userId, int page, int pageSize, int? year = null, int? month = null)
+        {
+            var query = ForUserInMonth(userId, year, month)
                 .OrderByDescending(t => t.CreatedAt);
 
             var totalCount = query.Count();
@@ -60,9 +73,9 @@ namespace Ledger.API.Data.Services
             };
         }
 
-        public TransactionSummaryDto GetSummary(int userId)
+        public TransactionSummaryDto GetSummary(int userId, int? year = null, int? month = null)
         {
-            var userTransactions = context.Transactions.Where(t => t.UserId == userId);
+            var userTransactions = ForUserInMonth(userId, year, month);
 
             var totalIncome = userTransactions.Where(t => t.Type == "Income").Sum(t => (decimal?)t.Amount) ?? 0;
             var totalExpenses = userTransactions.Where(t => t.Type == "Expense").Sum(t => (decimal?)t.Amount) ?? 0;

@@ -45,6 +45,7 @@ Migrations/                  EF Core migration history
 Ledger.API.Tests/
   TransactionAmountPrecisionTests.cs  Unit tests against TransactionsService via EF Core's
                                        InMemory provider — no web host or real DB required
+  TransactionMonthFilterTests.cs      Month filter: boundary days, all-time fallback, user isolation
 ```
 
 ## Running locally
@@ -113,11 +114,11 @@ All `Transactions` endpoints require `Authorization: Bearer <token>` and operate
 
 | Method | Route | Body / Query | Response |
 |---|---|---|---|
-| GET | `/api/Transactions/All?page=1&pageSize=10` | — | `200 { items, totalCount, page, pageSize }` |
-| GET | `/api/Transactions/Summary` | — | `200 { totalIncome, totalExpenses, netBalance }` — aggregated across **all** of the user's transactions, independent of pagination |
+| GET | `/api/Transactions/All?page=1&pageSize=10&year=2026&month=9` | — | `200 { items, totalCount, page, pageSize }` · `year`/`month` are optional but must be sent together (month 1–12), otherwise `400` |
+| GET | `/api/Transactions/Summary?year=2026&month=9` | — | `200 { totalIncome, totalExpenses, netBalance }` — aggregated across **all** of the user's transactions (or all of one month when `year`/`month` are given), independent of pagination |
 | GET | `/api/Transactions/Details/{id}` | — | `200 <transaction>` · `404` if missing or not owned by caller |
 | POST | `/api/Transactions/Create` | `{ type, amount, category, createdAt }` | `200 <created transaction>` |
-| PUT | `/api/Transactions/Update/{id}` | `{ type, amount, category }` | `200 <updated transaction>` · `404` if missing or not owned |
+| PUT | `/api/Transactions/Update/{id}` | `{ type, amount, category, createdAt }` | `200 <updated transaction>` · `404` if missing or not owned |
 | DELETE | `/api/Transactions/Delete/{id}` | — | `200` · `404` if missing or not owned |
 
 `page`/`pageSize` are clamped server-side (`page` ≥ 1, `1 ≤ pageSize ≤ 100`) regardless of what's passed.
@@ -128,10 +129,13 @@ All `Transactions` endpoints require `Authorization: Bearer <token>` and operate
 dotnet test
 ```
 
-Runs `Ledger.API.Tests` — currently two unit tests against `TransactionsService`, using EF Core's InMemory provider so neither a real database nor a running web host is needed:
+Runs `Ledger.API.Tests` — currently six unit tests against `TransactionsService`, using EF Core's InMemory provider so neither a real database nor a running web host is needed:
 
 - `GetSummary` sums fractional amounts (e.g. `0.1 + 0.2`) with exact `decimal` precision — the regression test for the bug described below.
 - `GetSummary` only includes the requesting user's own transactions.
+- Month filter: `GetSummary` and `GetAll` include the first and last day of a month but not the neighbouring days (Aug 31 / Oct 1), still cover all time when no month is given, and never return another user's rows.
+
+The month filter was also checked end to end against the real SQL Server database with a throwaway user (month boundaries, all-time vs. one month, and `400` on `month=13` or `year` without `month`).
 
 There's no integration-level coverage yet — the service layer is unit-tested, but the controllers and the JWT/authorization pipeline itself (e.g. via `WebApplicationFactory<Program>`) aren't.
 
@@ -145,6 +149,21 @@ Fixed by switching `Amount` (and the summary totals) to `decimal`, explicitly ma
 
 - **Synchronous EF Core calls.** `TransactionsService` uses `ToList()` / `FirstOrDefault()` / `SaveChanges()`, not their `Async` counterparts. Not a functional problem at this app's scale, but a synchronous DB call blocks a thread-pool thread for the query's duration — under real concurrent load this should be converted to `async`/`await` throughout the service and controller layers.
 - **No integration tests** — see Testing above.
+
+## Roadmap
+
+**Goal:** a user can see whether they're on track for the month. Today the app answers "what have I spent?" but not "am I overspending?", and its totals cover all time.
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1. Month filter | Optional year/month on `GetAll` and `GetSummary`; month selector on the dashboard. No schema change. | **Built** |
+| 2. Budgets | New `Budget` entity (`UserId`, `Category`, `MonthlyLimit` as `decimal(18,2)`, unique per user and category), migration, and a `BudgetsController` with the same per-user ownership rules as transactions. | Planned |
+| 3. Progress view | Endpoint returning spent vs. limit per category for a month (`GroupBy` aggregation); progress bars in the dashboard. | Planned |
+| 4. Tests and write-up | Unit tests for the aggregation and budget ownership; README updated to match what shipped. | Planned |
+
+Deliberately out of scope for now: bank sync, CSV import, recurring transactions, charts, multi-currency, forgot-password, and converting EF Core calls to `async`.
+
+Phase 2 changes the schema on a database that production shares, so its migration is applied first, then the code is deployed (same sequencing as the `decimal` fix above).
 
 ## Deploying (Azure)
 

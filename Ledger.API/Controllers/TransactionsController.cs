@@ -14,25 +14,31 @@ namespace Ledger.API.Controllers
     public class TransactionsController(ITransactionsService transactionsService) : ControllerBase
     {
         [HttpGet("All")]
-        public IActionResult GetAll([FromQuery] int page = 1, [FromQuery] int pageSize = 10)
+        public IActionResult GetAll([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] int? year = null, [FromQuery] int? month = null)
         {
             if (!TryGetUserId(out var userId))
                 return BadRequest("Could not get the user ID");
+
+            if (!IsValidMonthFilter(year, month))
+                return BadRequest("year and month must be provided together, with month 1-12 and a four-digit year");
 
             page = page < 1 ? 1 : page;
             pageSize = pageSize is < 1 or > 100 ? 10 : pageSize;
 
-            var result = transactionsService.GetAll(userId, page, pageSize);
+            var result = transactionsService.GetAll(userId, page, pageSize, year, month);
             return Ok(result);
         }
 
         [HttpGet("Summary")]
-        public IActionResult GetSummary()
+        public IActionResult GetSummary([FromQuery] int? year = null, [FromQuery] int? month = null)
         {
             if (!TryGetUserId(out var userId))
                 return BadRequest("Could not get the user ID");
 
-            var summary = transactionsService.GetSummary(userId);
+            if (!IsValidMonthFilter(year, month))
+                return BadRequest("year and month must be provided together, with month 1-12 and a four-digit year");
+
+            var summary = transactionsService.GetSummary(userId, year, month);
             return Ok(summary);
         }
 
@@ -84,6 +90,16 @@ namespace Ledger.API.Controllers
                 return NotFound();
 
             return Ok();
+        }
+
+        private static bool IsValidMonthFilter(int? year, int? month)
+        {
+            if (!year.HasValue && !month.HasValue)
+                return true;
+
+            return year.HasValue && month.HasValue
+                && year.Value is >= 1000 and <= 9998
+                && month.Value is >= 1 and <= 12;
         }
 
         private bool TryGetUserId(out int userId)
