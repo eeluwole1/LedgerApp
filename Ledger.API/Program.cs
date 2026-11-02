@@ -63,3 +63,6 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+// Lets the integration tests (WebApplicationFactory<Program>) see the top-level Program class.
+public partial class Program { }

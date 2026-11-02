@@ -19,7 +19,7 @@ The part worth highlighting: I found and fixed a floating-point precision bug in
 - **JWT Bearer authentication** (`Microsoft.AspNetCore.Authentication.JwtBearer`)
 - **`PasswordHasher<T>`** (`Microsoft.Extensions.Identity.Core`) for password hashing — not the full ASP.NET Core Identity framework, just its hashing utility
 - **Swagger / OpenAPI** for interactive API docs in development
-- **xUnit** + **EF Core's InMemory provider** for service-layer unit tests (`Ledger.API.Tests`)
+- **xUnit** + **EF Core's InMemory provider** for service-layer unit tests, and **`WebApplicationFactory<Program>`** (`Microsoft.AspNetCore.Mvc.Testing`) for integration tests that drive the real HTTP pipeline (`Ledger.API.Tests`)
 
 ## Project structure
 
@@ -51,6 +51,8 @@ Ledger.API.Tests/
                                        InMemory provider — no web host or real DB required
   TransactionMonthFilterTests.cs      Month filter: boundary days, all-time fallback, user isolation
   BudgetsServiceTests.cs              Budget CRUD, duplicates, ownership, and the progress math
+  ApiFactory.cs                       WebApplicationFactory<Program> with an in-memory DB; registers users via the real endpoint
+  ApiIntegrationTests.cs              Real HTTP requests through routing, JWT auth, controllers and services
 ```
 
 ## Running locally
@@ -148,7 +150,7 @@ One monthly limit per category per user. Same ownership rules as transactions: e
 dotnet test
 ```
 
-Runs `Ledger.API.Tests` — currently fifteen unit tests against `TransactionsService` and `BudgetsService`, using EF Core's InMemory provider so neither a real database nor a running web host is needed:
+Runs `Ledger.API.Tests` — 30 tests: fifteen unit tests against `TransactionsService` and `BudgetsService` (EF Core's InMemory provider, no web host or real database needed), plus fifteen integration tests (next section). The unit tests cover:
 
 - `GetSummary` sums fractional amounts (e.g. `0.1 + 0.2`) with exact `decimal` precision — the regression test for the bug described below.
 - `GetSummary` only includes the requesting user's own transactions.
@@ -160,7 +162,18 @@ Budgets were also checked end to end against the real SQL Server database and th
 
 The month filter was also checked end to end against the real SQL Server database with a throwaway user (month boundaries, all-time vs. one month, and `400` on `month=13` or `year` without `month`).
 
-There's no integration-level coverage yet — the service layer is unit-tested, but the controllers and the JWT/authorization pipeline itself (e.g. via `WebApplicationFactory<Program>`) aren't.
+### Integration tests
+
+`ApiIntegrationTests` boots the real app through `WebApplicationFactory<Program>` (routing, JWT validation, controllers, services, EF Core) against an in-memory database, and sends real HTTP requests as freshly registered users — 15 tests, so 30 in total. It runs in a `Testing` environment on purpose: `Development` would load the developer's user-secrets, i.e. the real Azure SQL connection string. They cover:
+
+- **Authentication:** protected endpoints return `401` with no token or a garbage token; duplicate registration is `400`; a wrong password is `401`.
+- **Per-user isolation:** another user's transaction returns `404` for read, update and delete and is left untouched; "not yours" and "doesn't exist" produce the same response (apart from ASP.NET's per-request `traceId`); list and summary only include the caller's own data.
+- **Regressions for the bugs documented here:** an edited transaction date is persisted, and the month filter / pagination clamp behave as documented (including `400` on bad input).
+- **Budgets:** duplicates are `409`, invalid input is `400`, another user's budget is invisible and `404`, and `Progress` sums only that month's expenses in the category.
+
+These tests are only worth having if they can fail. To check that, `GetById` was temporarily changed to ignore `UserId`: both isolation tests failed (another user got `200 OK` for someone else's transaction), and the file was then restored.
+
+`Program` is made visible to the tests with an empty `public partial class Program { }` at the bottom of `Program.cs`.
 
 ## A bug found and fixed: `Amount` was `double`
 
@@ -171,7 +184,7 @@ Fixed by switching `Amount` (and the summary totals) to `decimal`, explicitly ma
 ## Known limitations
 
 - **Synchronous EF Core calls.** `TransactionsService` uses `ToList()` / `FirstOrDefault()` / `SaveChanges()`, not their `Async` counterparts. Not a functional problem at this app's scale, but a synchronous DB call blocks a thread-pool thread for the query's duration — under real concurrent load this should be converted to `async`/`await` throughout the service and controller layers.
-- **No integration tests** — see Testing above.
+- **Integration tests use an in-memory database, not SQL Server.** They exercise the real HTTP pipeline, but not SQL Server-specific behaviour (collation, the unique-index race in `BudgetsService.Add`, serverless cold starts).
 - **Categories are free text.** Neither transactions nor budgets validate a category against a server-side list; the dropdown lives in the Angular client, and a budget only "sees" spending whose category text matches it (case-insensitively). Fine while the client is the only writer, but a shared list on the server would be the next step.
 
 ## Roadmap
