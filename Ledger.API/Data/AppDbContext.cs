@@ -22,6 +22,9 @@ namespace Ledger.API.Data
                 .HasIndex(b => new { b.UserId, b.Category })
                 .IsUnique();
 
+            modelBuilder.Entity<User>()
+                .HasIndex(u => u.PasswordResetTokenHash);
+
             // SQL Server doesn't persist DateTimeKind, so values come back as
             // Unspecified after a round-trip, which makes JSON serialization omit
             // the "Z" suffix and causes clients to misread UTC values as local time.

@@ -1,11 +1,13 @@
 using Ledger.API.Data;
 using Ledger.API.Data.Services;
+using Ledger.API.Mail;
 using Ledger.API.Models;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using System.Net.Mail;
 using System.Text;
 using System.Threading.RateLimiting;
 
@@ -76,6 +78,22 @@ builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlServer(conn));
 builder.Services.AddScoped<ITransactionsService, TransactionsService>();
 builder.Services.AddScoped<IBudgetsService, BudgetsService>();
 builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
+
+// Password reset emails: real SMTP when Email:Host is set, otherwise nothing is sent (see UnconfiguredEmailSender).
+// A half-configured mail section fails at startup rather than on the first user who forgets a password.
+var emailOptions = builder.Configuration.GetSection("Email").Get<EmailOptions>() ?? new EmailOptions();
+if (!string.IsNullOrWhiteSpace(emailOptions.Host)
+    && !(MailAddress.TryCreate(emailOptions.From, out _)))
+{
+    throw new InvalidOperationException(
+        "Email:Host is set, so Email:From must be a valid sender address (for example the Email__From app setting in Azure).");
+}
+builder.Services.AddSingleton<IEmailSender>(sp => string.IsNullOrWhiteSpace(emailOptions.Host)
+    ? new UnconfiguredEmailSender(
+        sp.GetRequiredService<ILogger<UnconfiguredEmailSender>>(),
+        sp.GetRequiredService<IHostEnvironment>())
+    : new SmtpEmailSender(emailOptions));
+builder.Services.AddScoped<IPasswordResetService, PasswordResetService>();
 
 builder.Services.AddControllers();
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi

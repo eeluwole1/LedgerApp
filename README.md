@@ -19,13 +19,14 @@ The part worth highlighting: I found and fixed a floating-point precision bug in
 - **JWT Bearer authentication** (`Microsoft.AspNetCore.Authentication.JwtBearer`)
 - **`PasswordHasher<T>`** (`Microsoft.Extensions.Identity.Core`) for password hashing — not the full ASP.NET Core Identity framework, just its hashing utility
 - **Swagger / OpenAPI** for interactive API docs in development
+- **SMTP email** (`System.Net.Mail`) behind an `IEmailSender` interface, used for password-reset links
 - **xUnit** + **EF Core's InMemory provider** for service-layer unit tests, and **`WebApplicationFactory<Program>`** (`Microsoft.AspNetCore.Mvc.Testing`) for integration tests that drive the real HTTP pipeline (`Ledger.API.Tests`)
 
 ## Project structure
 
 ```
 Controllers/
-  AuthController.cs          Register, Login — issues JWTs
+  AuthController.cs          Register, Login, ForgotPassword, ResetPassword
   TransactionsController.cs  CRUD + pagination + summary, all scoped to the logged-in user
   BudgetsController.cs       Per-category monthly budgets + spent-vs-limit progress, scoped to the user
 Data/
@@ -33,11 +34,18 @@ Data/
   Services/
     TransactionsService.cs    Business logic + queries, called by the controller
     BudgetsService.cs         Budget CRUD + the monthly progress aggregation
+    PasswordResetService.cs   Issues and redeems password-reset tokens
+Mail/
+  IEmailSender.cs             The one-method interface the rest of the app depends on
+  SmtpEmailSender.cs          Real delivery over SMTP (used when Email:Host is set)
+  UnconfiguredEmailSender.cs  Used when it isn't: sends nothing (logs the message in Development only)
+  EmailOptions.cs             The "Email" configuration section
 Models/
   User.cs, Transaction.cs, Budget.cs  EF entities — money columns are decimal(18,2), not double/float
   Base/BaseEntity.cs          Shared Id/CreatedAt/UpdatedAt
 Dtos/
   PostUserDto, LoginUserDto           Auth request shapes
+  ForgotPasswordDto, ResetPasswordDto Password-reset request shapes
   PostTransactionDto, PutTransactionDto  Transaction request shapes
   PagedResult<T>, TransactionSummaryDto  Response shapes
   SaveBudgetDto, UpdateBudgetDto      Budget request shapes (validated with data annotations)
@@ -53,6 +61,12 @@ Ledger.API.Tests/
   BudgetsServiceTests.cs              Budget CRUD, duplicates, ownership, and the progress math
   ApiFactory.cs                       WebApplicationFactory<Program> with an in-memory DB; registers users via the real endpoint
   ApiIntegrationTests.cs              Real HTTP requests through routing, JWT auth, controllers and services
+  AuthHardeningTests.cs               Sign-in rate limit, registration validation, Swagger not served in production
+  PasswordResetServiceTests.cs        Token issue/redeem rules: hashing, expiry, single use, cooldown, send failure
+  PasswordResetIntegrationTests.cs    The whole reset flow over HTTP, reading the emailed link from a capturing sender
+  SmtpEmailSenderTests.cs             SmtpEmailSender against a minimal in-process SMTP server on a loopback socket
+  EmailConfigurationTests.cs          Startup refuses a half-configured mail section
+  CapturingEmailSender.cs             Test double that records emails instead of sending them
 ```
 
 ## Running locally
@@ -88,6 +102,40 @@ This is what stops the classic mistake of relying on `[Authorize]` alone: `[Auth
 
 **Login is defensive about legacy/malformed password hashes**: `AuthController.Login` wraps `PasswordHasher<User>.VerifyHashedPassword` in a try/catch for `FormatException` — if a stored password value isn't a hash the current hasher recognizes (e.g. a row seeded before hashing was added), it's treated as a failed match (`401`) instead of bubbling up as an unhandled `500`.
 
+**Other protections already in place on the auth endpoints** (see `Program.cs`):
+
+- **Rate limiting:** all `Auth` endpoints share a per-client-IP limit (default 10 requests per 5 minutes, tunable with `RateLimiting__AuthPermitLimit` / `RateLimiting__AuthWindowMinutes`); past it the API answers `429`. The limit is keyed on the connection's remote IP, so if the API is ever put behind a proxy or load balancer, forwarded-header handling has to be configured or every client will share one bucket.
+- **Startup check on the signing key:** outside Development and the test host the app refuses to start if `Jwt:Key` is missing, a placeholder, or shorter than 32 bytes.
+- **Swagger UI is only served in Development.**
+- **Registration validation:** a well-formed email (max 254) and a password of 8–128 characters; emails are trimmed and lower-cased, so sign-in is case-insensitive.
+
+### Password reset
+
+`POST /api/Auth/ForgotPassword` → an email with a link → `POST /api/Auth/ResetPassword`. `PasswordResetService` does the work; the controller only translates results to HTTP.
+
+- **The token is 256 random bits and only its SHA-256 hash is stored** (`Users.PasswordResetTokenHash`, plus an expiry). A leaked database can't be used to reset anyone's password; only whoever holds the emailed link can.
+- **It expires after 1 hour and works once.** Redeeming it clears both columns. Asking for a new link overwrites the old token, so the previous email stops working.
+- **No account enumeration:** `ForgotPassword` returns the same `200` and the same message whether or not the email has an account (a malformed address is a `400`, which reveals nothing about who is registered).
+- **A 2-minute cooldown per account** means the form can't be used to flood someone's inbox; a request inside the window gets the normal answer but sends nothing.
+- **The link carries the token in the URL fragment** (`/reset-password#token=…`). Browsers never send a fragment to a server or in a `Referer` header, and the Angular page removes it from the address bar as soon as it has read it.
+- **A failed send doesn't leak and doesn't strand the user:** if the mail server errors, the problem is logged, the response is still the generic one, and the token is cleared so an immediate retry isn't blocked by the cooldown.
+- **Validation doesn't burn the link:** a too-short new password is rejected before the token is checked, so the user can fix it and use the same link.
+- The reset page link is built from `Frontend:BaseUrl`, falling back to the first entry in `AllowedOrigins`.
+
+**Email configuration** (`Email__*` app settings in Azure, or user-secrets locally). With no `Email:Host` nothing is sent: in Development the message, including the link, is written to the console log so you can click it; in any other environment the app only logs a warning (the message holds a live token, so it is deliberately not logged).
+
+| Setting | Meaning |
+|---|---|
+| `Email__Host` | SMTP server. Setting it switches real sending on. |
+| `Email__Port` | Default `587`. |
+| `Email__EnableSsl` | Default `true` (STARTTLS). |
+| `Email__Username` / `Email__Password` | Credentials, if the server needs them. Keep the password in user-secrets / App Service settings, never in a file. |
+| `Email__From` | Required once `Email__Host` is set; the app **fails at startup** rather than on the first reset request if it's missing or not a valid address. |
+| `Email__FromName` | Display name, default `LedgerApp`. |
+| `Frontend__BaseUrl` | Optional; where the link points. Defaults to `AllowedOrigins[0]`. |
+
+The mail provider is a deployment decision and nothing here depends on a particular one. Whichever you pick must accept SMTP with a sender you're allowed to use (most providers require verifying the sending address or domain, and free mailbox providers usually need an app-specific password).
+
 ### JWT configuration
 
 Read from the `Jwt` section of configuration (`appsettings.json` locally; override via environment variables or your host's configuration/secrets store in any other environment):
@@ -116,6 +164,10 @@ All `Transactions` endpoints require `Authorization: Bearer <token>` and operate
 |---|---|---|---|
 | POST | `/api/Auth/Register` | `{ email, password }` | `200 { token, email }` · `400` if email is taken |
 | POST | `/api/Auth/Login` | `{ email, password }` | `200 { token, email }` · `401` on bad credentials |
+| POST | `/api/Auth/ForgotPassword` | `{ email }` | `200 { message }` — identical whether or not the email has an account · `400` on a malformed email |
+| POST | `/api/Auth/ResetPassword` | `{ token, newPassword }` (8–128 characters) | `200 { message }` · `400` if the token is unknown, expired or already used, or the password is invalid |
+
+Every `Auth` endpoint is rate limited per client IP (`429` once the limit is reached).
 
 ### Transactions
 
@@ -150,7 +202,7 @@ One monthly limit per category per user. Same ownership rules as transactions: e
 dotnet test
 ```
 
-Runs `Ledger.API.Tests` — 30 tests: fifteen unit tests against `TransactionsService` and `BudgetsService` (EF Core's InMemory provider, no web host or real database needed), plus fifteen integration tests (next section). The unit tests cover:
+Runs `Ledger.API.Tests` — 58 tests. Fifteen are unit tests against `TransactionsService` and `BudgetsService` (EF Core's InMemory provider, no web host or real database needed); the rest are the integration, auth-hardening, password-reset and email tests described below. The `TransactionsService` / `BudgetsService` unit tests cover:
 
 - `GetSummary` sums fractional amounts (e.g. `0.1 + 0.2`) with exact `decimal` precision — the regression test for the bug described below.
 - `GetSummary` only includes the requesting user's own transactions.
@@ -164,7 +216,7 @@ The month filter was also checked end to end against the real SQL Server databas
 
 ### Integration tests
 
-`ApiIntegrationTests` boots the real app through `WebApplicationFactory<Program>` (routing, JWT validation, controllers, services, EF Core) against an in-memory database, and sends real HTTP requests as freshly registered users — 15 tests, so 30 in total. It runs in a `Testing` environment on purpose: `Development` would load the developer's user-secrets, i.e. the real Azure SQL connection string. They cover:
+`ApiIntegrationTests` boots the real app through `WebApplicationFactory<Program>` (routing, JWT validation, controllers, services, EF Core) against an in-memory database, and sends real HTTP requests as freshly registered users. It runs in a `Testing` environment on purpose: `Development` would load the developer's user-secrets, i.e. the real Azure SQL connection string. They cover:
 
 - **Authentication:** protected endpoints return `401` with no token or a garbage token; duplicate registration is `400`; a wrong password is `401`.
 - **Per-user isolation:** another user's transaction returns `404` for read, update and delete and is left untouched; "not yours" and "doesn't exist" produce the same response (apart from ASP.NET's per-request `traceId`); list and summary only include the caller's own data.
@@ -174,6 +226,17 @@ The month filter was also checked end to end against the real SQL Server databas
 These tests are only worth having if they can fail. To check that, `GetById` was temporarily changed to ignore `UserId`: both isolation tests failed (another user got `200 OK` for someone else's transaction), and the file was then restored.
 
 `Program` is made visible to the tests with an empty `public partial class Program { }` at the bottom of `Program.cs`.
+
+### Password reset tests
+
+- **`PasswordResetServiceTests`** (service, real `PasswordHasher`, in-memory DB): unknown email sends nothing; a known email gets a link on the configured frontend and the database holds only a 64-character hash, not the token; lookup ignores case and spaces; a second request inside the cooldown sends nothing; after the cooldown a new link works and the old one stops; a valid token changes the password once and clears itself; expired and unknown tokens are rejected without changing the password; a failing mail server doesn't throw, clears the token, and doesn't block the retry.
+- **`PasswordResetIntegrationTests`** (real HTTP pipeline): identical answers for known and unknown emails; a malformed email is `400` and sends nothing; the emailed link resets the password end to end (old password `401`, new one `200`) and can't be replayed; a garbage token is `400` and changes nothing; a too-short password is `400` and doesn't use up the link; one account's link can't reset another account.
+- **`SmtpEmailSenderTests`:** the real `SmtpEmailSender` talks SMTP over a loopback socket to a minimal in-process server, and the test checks the sender, recipient, subject and that the reset link arrives intact (including quoted-printable decoding); an unreachable server throws so the caller can handle it.
+- **`EmailConfigurationTests`:** the app refuses to start when `Email:Host` is set without a valid `Email:From`, and starts with a complete configuration.
+
+To check these can fail, the service was temporarily changed to skip the expiry check (the expired-token test failed) and to leave the token in place after use (the replay tests failed), and `SmtpEmailSender` was changed to send the wrong subject (the SMTP test failed). Each change was reverted.
+
+The flow was also run end to end against a throwaway **SQL Server LocalDB** database (all five migrations applied, including `AddPasswordReset`) with the Angular dev server: link from the login page, an email pasted with a trailing space, the confirmation, the cooldown suppressing a second email, opening the emailed link (token read, then removed from the address bar), validation of a short and a mismatched password, a successful reset followed by sign-in with the new password only, and the "invalid or expired" and "missing link" pages. The shared Azure SQL database was not used; no real email was sent (Development logs the message instead).
 
 ## A bug found and fixed: `Amount` was `double`
 
@@ -185,6 +248,9 @@ Fixed by switching `Amount` (and the summary totals) to `decimal`, explicitly ma
 
 - **Synchronous EF Core calls.** `TransactionsService` uses `ToList()` / `FirstOrDefault()` / `SaveChanges()`, not their `Async` counterparts. Not a functional problem at this app's scale, but a synchronous DB call blocks a thread-pool thread for the query's duration — under real concurrent load this should be converted to `async`/`await` throughout the service and controller layers.
 - **Integration tests use an in-memory database, not SQL Server.** They exercise the real HTTP pipeline, but not SQL Server-specific behaviour (collation, the unique-index race in `BudgetsService.Add`, serverless cold starts).
+- **Password reset sends nothing until a mail server is configured.** Without `Email__Host` the reset endpoints still work and still answer normally, but no email goes out, so in production a user would wait for a message that never arrives (the app logs a warning). SMTP delivery is tested against an in-process server, not against a real provider.
+- **A reset doesn't sign out existing sessions.** Tokens already issued stay valid until they expire (1 hour). Revoking them would need a per-user security stamp checked on each request.
+- **Timing hints at whether an account exists.** The response *body* is identical for known and unknown emails, but a known email does extra work (database write and an SMTP send) before answering, so a patient attacker could tell them apart by response time. Sending the email from a background queue would remove that.
 - **Categories are free text.** Neither transactions nor budgets validate a category against a server-side list; the dropdown lives in the Angular client, and a budget only "sees" spending whose category text matches it (case-insensitively). Fine while the client is the only writer, but a shared list on the server would be the next step.
 
 ## Roadmap
@@ -198,9 +264,11 @@ Fixed by switching `Amount` (and the summary totals) to `decimal`, explicitly ma
 | 3. Progress view | Endpoint returning spent vs. limit per category for a month (`GroupBy` aggregation); progress bars in the dashboard. | **Built** (API + dashboard bars + `/budgets` page) |
 | 4. Tests and write-up | Unit tests for the aggregation and budget ownership; README updated to match what shipped. | **Built** |
 
-Deliberately out of scope for now: bank sync, CSV import, recurring transactions, charts, multi-currency, forgot-password, and converting EF Core calls to `async`.
+Deliberately out of scope for now: bank sync, CSV import, recurring transactions, charts, multi-currency, and converting EF Core calls to `async`.
 
 Phase 2 changes the schema on a database that production shares, so its migration is applied first, then the code is deployed (same sequencing as the `decimal` fix above).
+
+**After the roadmap: password reset.** Built (see [Password reset](#password-reset)). It adds two nullable columns to `Users` (`AddPasswordReset`), so the same rule applies: apply that migration to the shared database *before* deploying the code, because the new code reads those columns on every sign-in. Existing code ignores them, which makes the order safe.
 
 ## Deploying (Azure)
 
@@ -210,6 +278,7 @@ Phase 2 changes the schema on a database that production shares, so its migratio
 - `Jwt:Issuer` / `Jwt:Audience` → your deployed API's URL
 - `Jwt:Key` → a freshly generated secret, **not** the development one
 - `AllowedOrigins` → your deployed frontend's URL
+- `Email__Host`, `Email__From` (and `Email__Username` / `Email__Password` if the server needs them) → a mail server, so password-reset emails are actually sent. Optional, but without it the "forgot password" flow sends nothing; see [Password reset](#password-reset).
 
 Prefer setting these via Azure App Service's **Configuration → Application settings** blade (environment variables, using double-underscore for nested keys — e.g. `Jwt__Key`, `AllowedOrigins__0`) or Key Vault rather than editing `appsettings.Production.json` directly, so secrets never sit in source control. Saving Application settings triggers an automatic restart of the app.
 

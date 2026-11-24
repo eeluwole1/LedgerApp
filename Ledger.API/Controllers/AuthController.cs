@@ -1,4 +1,5 @@
 using Ledger.API.Data;
+using Ledger.API.Data.Services;
 using Ledger.API.Dtos;
 using Ledger.API.Models;
 using Microsoft.AspNetCore.Cors;
@@ -19,7 +20,8 @@ namespace Ledger.API.Controllers
     public class AuthController(
         AppDbContext context,
         IConfiguration configuration,
-        IPasswordHasher<User> passwordHasher) : ControllerBase
+        IPasswordHasher<User> passwordHasher,
+        IPasswordResetService passwordResetService) : ControllerBase
     {
         [HttpPost("Register")]
         public IActionResult Register([FromBody] PostUserDto dto)
@@ -78,6 +80,25 @@ namespace Ledger.API.Controllers
             var token = GenerateJwtToken(user);
 
             return Ok(new { token, email = user.Email });
+        }
+
+        [HttpPost("ForgotPassword")]
+        public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordDto dto)
+        {
+            await passwordResetService.RequestResetAsync(dto.Email);
+
+            // Same answer whether or not the email has an account, so this can't be used to find out who's registered.
+            return Ok(new { message = "If that email is registered, a reset link is on its way." });
+        }
+
+        [HttpPost("ResetPassword")]
+        public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
+        {
+            var changed = await passwordResetService.ResetPasswordAsync(dto.Token, dto.NewPassword);
+            if (!changed)
+                return BadRequest(new { message = "This reset link is invalid or has expired." });
+
+            return Ok(new { message = "Your password has been updated. You can now sign in." });
         }
 
         private string GenerateJwtToken(User user)
