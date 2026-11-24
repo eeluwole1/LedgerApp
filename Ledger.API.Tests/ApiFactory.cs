@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Ledger.API.Tests
@@ -18,6 +19,11 @@ namespace Ledger.API.Tests
         {
             // Not "Development": that would load the developer's user-secrets (the real Azure SQL connection string).
             builder.UseEnvironment("Testing");
+
+            // Many tests sign up through the real endpoint, so lift the sign-in rate limit here.
+            // RateLimitedApiFactory lowers it again to test the limit itself.
+            builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(
+                new Dictionary<string, string?> { ["RateLimiting:AuthPermitLimit"] = "10000" }));
 
             builder.ConfigureServices(services =>
             {

@@ -26,6 +26,10 @@ jobs:
       - name: Build with dotnet
         run: dotnet build --configuration Release
 
+      # The deploy below only runs if every unit and integration test passes.
+      - name: Run tests
+        run: dotnet test --configuration Release --no-build
+
       - name: dotnet publish
         run: dotnet publish -c Release -o "${{env.DOTNET_ROOT}}/myapp"
 

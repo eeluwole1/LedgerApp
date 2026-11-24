@@ -4,6 +4,7 @@ using Ledger.API.Models;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
@@ -14,6 +15,7 @@ namespace Ledger.API.Controllers
     [Route("api/[controller]")]
     [ApiController]
     [EnableCors("AllowConfiguredOrigins")]
+    [EnableRateLimiting("auth")]
     public class AuthController(
         AppDbContext context,
         IConfiguration configuration,
@@ -22,7 +24,8 @@ namespace Ledger.API.Controllers
         [HttpPost("Register")]
         public IActionResult Register([FromBody] PostUserDto dto)
         {
-            if (context.Users.Any(u => u.Email == dto.Email))
+            var email = dto.Email.Trim().ToLowerInvariant();
+            if (context.Users.Any(u => u.Email == email))
             {
                 return BadRequest(new { message = "This email address is already taken" });
             }
@@ -31,7 +34,7 @@ namespace Ledger.API.Controllers
 
             var newUser = new User()
             {
-                Email = dto.Email,
+                Email = email,
                 Password = hashedPassword,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
@@ -48,7 +51,8 @@ namespace Ledger.API.Controllers
         [HttpPost("Login")]
         public IActionResult Login([FromBody] LoginUserDto dto)
         {
-            var user = context.Users.FirstOrDefault(u => u.Email == dto.Email);
+            var email = dto.Email.Trim().ToLowerInvariant();
+            var user = context.Users.FirstOrDefault(u => u.Email == email);
             if (user == null)
             {
                 return Unauthorized(new { message = "Invalid credentials" });
